@@ -1,0 +1,404 @@
+---
+title: "Metabolomics"
+author: "Stavros Oikonomou"
+date: "4/9/2021"
+output: html_document
+---
+
+```{r packages, warning=F,message=F}
+rm(list = ls(all = TRUE))
+
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+# usage
+packages <- c("openxlsx","plyr","dplyr","data.table","tidyr","knitr","tibble","Hmisc",
+              "tableone","compare","stargazer","ggplot2","sjPlot","tidyverse","lubridate",
+              "eeptools", "Rcpp", "nlme", "lme4","lmerTest","texreg","reshape","scales",
+              "FSA","NADA","childsds", "sjPlot","matrixStats","ggfortify","factoextra",
+              "ropls","stringr","AMR","ggfortify","rtemis","limma","readxl","xlsx")
+
+ipak(packages)
+```
+
+```{r}
+df <- read.csv("./data_files/Oomics_peakTable_20210307.csv", row.names=1, header = F)
+```
+
+```{r}
+rts <- sub(".*(?:\\((.*)\\)).*|.*", "\\1",df[2,]) #keep the parenthesis content
+
+rts <- str_remove(rts,"%") #removing the %
+
+df[2,] <- as.numeric(rts)#replace the RTS
+
+types <- str_split_fixed(row.names(df)[5:nrow(df)], "_",4)
+types <- as.data.frame(types)
+types <- types[,-1]
+names(types) <- c("batch","sample_order","sample_name")
+types$qc <- ifelse(types$sample_name=="QC","QC",ifelse(types$sample_name=="WBlank","Blank","Sample"))
+```
+
+```{r}
+df_final <- df[5:nrow(df),] %>% mutate_if(is.character, as.numeric)
+df_final <- cbind(types,df_final)
+df_final <- df_final %>% mutate(batch=as.numeric(batch),sample_order=as.numeric(sample_order)) %>% arrange(batch, sample_order)
+
+rm(types)
+```
+
+```{r}
+filter <- as.numeric(rts) > 60 # creating a filter for compounds above 60%
+
+table(filter)
+
+df_final<- df_final[,c(T,T,T,T,filter)] #filtering the compounds
+```
+
+```{r}
+zero_counter <- df_final %>% filter(qc=="Sample")
+
+zero_counter <- zero_counter[,5:233] 
+
+#create a filter with metabolite's zero above or below 20%
+zero_counter_filter <- sapply(zero_counter, function(x) sum(x==0)/nrow(zero_counter)<0.20)
+
+table(zero_counter_filter)
+#the metabolite list
+non_zero_met <- names(zero_counter)[zero_counter_filter]
+```
+
+### SERRF DATA PREPARATION
+
+```{r}
+df_final[df_final$qc=="Blank","qc"] <- "NA" #changing blank to sample
+```
+
+```{r}
+so <- as.character(df_final$batch)
+qc <- tolower(df_final$qc)
+sn <- df_final$sample_name
+
+s0 <- c("","batch", as.character(so))
+s1 <- c("","sampleType", qc)
+s2 <- c("","time",1:1312)
+s3 <- c("No","label",sn)
+
+s4<- df_final %>% select(-c("batch","sample_order","sample_name","qc"))
+s4 <- data.frame(t(s4))
+s4 <- cbind(1:nrow(s4),row.names(s4),s4)
+
+ser <- rbind(s0,s1,s2,s3,s4)
+```
+
+```{r, eval=F}
+write.xlsx(ser, "./data_files/GNPS_SERRF_blank.xlsx", sheetName = "Sheet1", 
+           row.names = F,col.names = F)
+```
+
+### Serrf output creation after removing the metabolites with zero percentage above 20%
+
+```{r}
+df_final2 <- df_final[c("batch","sample_order","sample_name","qc",non_zero_met)]
+
+s4<- df_final2 %>% select(-c("batch","sample_order","sample_name","qc"))
+s4 <- data.frame(t(s4))
+s4 <- cbind(1:nrow(s4),row.names(s4),s4)
+
+ser2 <- rbind(s0,s1,s2,s3,s4)
+```
+
+```{r, eval=F}
+write.xlsx(ser2, "./data_files/GNPS_SERRF_blank_zero_NA.xlsx", sheetName = "Sheet1", 
+           row.names = F,col.names = F)
+
+rm(so,qc,sn,s0,s1,s2,s3,s4)
+```
+
+### loading the output from SERRF platform
+
+<https://slfan.shinyapps.io/ShinySERRF/>
+
+```{r}
+df_serrf <- read.csv("./data_files/normalized by - SERRF blank zero NA.csv")
+df_serrf <- data.frame(t(df_serrf))
+
+names(df_serrf) <- df_serrf[1,]
+df_serrf <- df_serrf[2:1313,]
+df_serrf <- cbind(df_final[,1:4],df_serrf)
+
+df_serrf[df_serrf$qc=="NA","qc"] <- "Sample"
+```
+
+```{r, eval=F}
+write.csv(df_serrf,"./data_files/df_serrf.csv",row.names = F)
+```
+
+```{r readfiles, echo=FALSE}
+odf<-read.csv("./data_files/meas_omics_f.csv", header=T, sep=",")
+df_serrf<-read.csv("./data_files/df_serrf.csv")
+rsd <- read.csv("./data_files/RSDs.csv")
+```
+
+```{r}
+serrf_qc <- subset(df_serrf, qc=="QC") %>% select(-c("batch", "sample_order","sample_name", "qc"))
+serrf_sample <- subset(df_serrf, qc=="Sample") %>% select(-c("batch", "sample_order", "sample_name", "qc"))
+
+serrf_sd_qc <- sapply(serrf_qc, sd)
+serrf_sd_sample <- sapply(serrf_sample, sd)
+
+rsd$d_ratio <- serrf_sd_qc/serrf_sd_sample
+sum(rsd$d_ratio>0.5)
+
+metab <- rsd[rsd$SERRF<0.20 & rsd$d_ratio<0.50,"label"]
+
+rm(serrf_qc, serrf_sample, serrf_sd_qc, serrf_sd_sample)
+```
+
+```{r}
+goodmetabs_sub<-c("batch", "sample_order","sample_name", "qc", metab)
+
+df_log_pca <- df_serrf %>% select(all_of(goodmetabs_sub)) %>% filter(sample_name!="WBlank")
+
+df_log_pca[, metab] <- log(df_log_pca[,metab])
+
+
+df_logpca <- prcomp(df_log_pca[, metab] , center = TRUE, scale. = TRUE)
+
+autoplot(df_logpca, data=df_serrf[df_serrf$sample_name!="WBlank",], colour="qc", label=T, frame = TRUE, frame.type = 'norm')
+```
+
+```{r}
+df_serrf2 <- df_serrf %>% select(all_of(goodmetabs_sub)) %>% filter(qc=="Sample") %>% 
+  filter(sample_name!="WBlank")
+
+df<-merge(odf, df_serrf2, by.x="sample_code", by.y="sample_name")
+```
+
+```{r}
+df_log <- df
+df_log[,metab] <- log(df_log[,metab])
+```
+
+```{r pca, echo=FALSE}
+dff_logpca <- prcomp(df_log[,metab], center = TRUE, scale. = TRUE)
+
+autoplot(dff_logpca, data=df_log, colour="phase")
+
+p1 <-fviz_pca_ind(dff_logpca,
+         col.ind = "contrib", # Color by contribution
+         gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07") #assign gradient
+         )
+p1
+
+p1_filter<- p1$data$contrib < 4
+table(p1_filter)
+
+df_log <- df_log[p1_filter,]
+
+df_log <- df_log %>% filter(initial_anal=="Included")
+```
+
+```{r org, echo=FALSE, message=FALSE, warning=FALSE}
+regression_function<-function(met, dataframe) {
+  formula    <- as.formula(paste(met, "~ phase + Sex + BMI_start_sds + DaysfromTreatment +(1 |Code)", sep="" ))
+  res.mixed <- lmer(formula, data = dataframe )
+}
+models_simple<-lapply(metab, function(x) regression_function(x, df_log))
+
+#extract coefficients UNI
+Upper_Met<-NA
+smod_coef<-NA 
+Lower_Met<-NA
+pvalues<-NA
+for (model in 1:length(models_simple)) {
+  Upper_Met [model]<-eval(parse(text=(paste("confint(models_simple[[", model , "]])[4,2]", sep=""))))
+  Lower_Met [model]<-eval(parse(text=(paste("confint(models_simple[[", model , "]])[4,1]", sep=""))))
+  smod_coef [model]<-eval(parse(text=(paste("fixef(models_simple[[", model , "]])[2]", sep=""))))
+  pvalues[model]<-eval(parse(text=(paste("parameters::p_value(models_simple[[", model,"]])[2,2]", sep="")))) 
+}
+
+
+results_met<-cbind.data.frame(metab, smod_coef, Lower_Met, Upper_Met, pvalues)
+
+results_met2<-subset(results_met, pvalues<0.05)
+```
+
+```{r pba, echo=FALSE, warning=FALSE, message=FALSE}
+# PBA 
+regression_function_PB<-function(met, dataframe) {
+  formula    <- as.formula(paste(met, "~ log(pb1000) + phase + Sex + cr + BMI_start_sds + DaysfromTreatment + (1 |Code)", sep="" ))
+  res.mixed <- lmer(formula, data = dataframe )
+}
+models_simple_PB<-lapply(metab,function(x) regression_function_PB(x, df_log))
+
+#extract coefficients CI, p-values
+Upper_Met_PB<-NA
+smod_coef_PB<-NA
+Lower_Met_PB<-NA
+pvalues_PB<-NA
+
+for (model in 1:length(models_simple_PB)) {
+  Upper_Met_PB [model]<-eval(parse(text=(paste("confint(models_simple_PB[[", model , "]])[4,2]", sep=""))))
+  Lower_Met_PB [model]<-eval(parse(text=(paste("confint(models_simple_PB[[", model , "]])[4,1]", sep=""))))
+  smod_coef_PB [model]<-eval(parse(text=(paste("fixef(models_simple_PB[[", model , "]])[2]", sep=""))))
+ pvalues_PB[model]<-eval(parse(text=(paste("parameters::p_value(models_simple_PB[[", model,"]])[2,2]", sep="")))) 
+}
+
+results_PB<-cbind.data.frame(metab, smod_coef_PB, Lower_Met_PB, Upper_Met_PB, pvalues_PB)
+
+results_PB2<-subset(results_PB, pvalues_PB<0.05)
+```
+
+```{r cn, echo=FALSE, message=FALSE, warning=FALSE}
+# CN 
+regression_function_CN<-function(met, dataframe) {
+  formula    <- as.formula(paste(met, "~ cnlod + phase + Sex + cr + BMI_start_sds + DaysfromTreatment + (1 |Code)", sep="" ))
+  res.mixed <- lmer(formula, data = dataframe )
+}
+models_simple_CN<-lapply(metab,function(x) regression_function_CN(x, df_log))
+
+#extract coefficients, CI, p-values
+Upper_Met_CN<-NA
+smod_coef_CN<-NA
+Lower_Met_CN<-NA
+pvalues_CN<-NA
+
+for (model in 1:length(models_simple_CN)) {
+  Upper_Met_CN [model]<-eval(parse(text=(paste("confint(models_simple_CN[[", model , "]])[4,2]", sep=""))))
+  Lower_Met_CN [model]<-eval(parse(text=(paste("confint(models_simple_CN[[", model , "]])[4,1]", sep=""))))
+  smod_coef_CN [model]<-eval(parse(text=(paste("fixef(models_simple_CN[[", model , "]])[2]", sep=""))))
+ pvalues_CN[model]<-eval(parse(text=(paste("parameters::p_value(models_simple_CN[[", model,"]])[2,2]", sep="")))) 
+}
+
+results_CN<-cbind.data.frame(metab, smod_coef_CN, Lower_Met_CN, Upper_Met_CN, pvalues_CN)
+
+results_CN2<-subset(results_CN, pvalues_CN<0.05)
+```
+
+```{r sigmet, echo=FALSE}
+sigmetabs <- c(results_met2$metab, results_PB2$metab, results_CN2$metab)
+metabs <- unique(sigmetabs)
+```
+
+```{r baselinesample, echo=FALSE}
+df_log$sample_no_orig <- as.numeric(df_log$sample_no_orig)
+df_log2 <- subset(df_log, sample_no_orig>=2)
+
+df_log3 <- subset(df_log, sample_no_orig<=1)
+df_log3 <- df_log3[c("Code","sample_no_orig","md1000","ohdg","isopgf2a1000")]
+
+df_log4 <- merge(df_log3, df_log2, by = "Code", all.y = TRUE, suffixes = c("_BL", "_TR"))
+```
+
+```{r iso, echo=FALSE, message=FALSE, warning=FALSE}
+regression_function_ISO_IT<-function(met, dataframe) {
+  formula    <- as.formula(paste("log(isopgf2a1000_TR)~ ", met, "+ phase + cr + log(isopgf2a1000_BL) + Sex + BMI_start_sds + DaysfromTreatment + 
+                                  ", met,"*DaysfromTreatment + (1|Code)", sep="" ))
+  res.mixed <- lmer(formula, data = dataframe )
+}
+models_simple_ISO_IT<-lapply(metabs,function(x) regression_function_ISO_IT(x, df_log4))
+
+Upper_Met_ISO_IT<-NA
+smod_coef_ISO_IT<-NA
+Lower_Met_ISO_IT<-NA
+pvalues_ISO_IT<-NA
+
+for (model in 1:length(models_simple_ISO_IT)) {
+  Upper_Met_ISO_IT [model]<-eval(parse(text=(paste("confint(models_simple_ISO_IT[[", model , "]])[4,2]", sep=""))))
+  Lower_Met_ISO_IT [model]<-eval(parse(text=(paste("confint(models_simple_ISO_IT[[", model , "]])[4,1]", sep=""))))
+  smod_coef_ISO_IT [model]<-eval(parse(text=(paste("fixef(models_simple_ISO_IT[[", model , "]])[2]", sep=""))))
+ pvalues_ISO_IT[model]<-eval(parse(text=(paste("parameters::p_value(models_simple_ISO_IT[[", model,"]])[2,2]", sep="")))) 
+}
+
+results_ISO_IT<-cbind.data.frame(metabs, smod_coef_ISO_IT, Lower_Met_ISO_IT, Upper_Met_ISO_IT, pvalues_ISO_IT)
+
+smod_coef_phase_iso_IT <- NA
+pvalues_ISO_phase_IT <- NA
+for (model in 1:length(models_simple_ISO_IT)) {
+ smod_coef_phase_iso_IT [model]<-eval(parse(text=(paste("fixef(models_simple_ISO_IT[[", model , "]])[3]", sep=""))))
+ pvalues_ISO_phase_IT[model]<-eval(parse(text=(paste("parameters::p_value(models_simple_ISO_IT[[", model,"]])[3,2]", sep=""))))
+}
+
+smod_coef_interac_iso_IT <- NA
+pvalues_ISO_interac_IT <- NA
+for (model in 1:length(models_simple_ISO_IT)) {
+ smod_coef_interac_iso_IT [model]<-eval(parse(text=(paste("fixef(models_simple_ISO_IT[[", model , "]])[9]", sep=""))))
+ pvalues_ISO_interac_IT[model]<-eval(parse(text=(paste("parameters::p_value(models_simple_ISO_IT[[", model,"]])[9,2]", sep=""))))
+}
+
+results_iso_phase_interac_IT <- cbind.data.frame(metabs,smod_coef_phase_iso_IT,pvalues_ISO_phase_IT,smod_coef_interac_iso_IT,pvalues_ISO_interac_IT)
+
+write.csv(results_iso_phase_interac_IT, "phase_interaction_pvalues_iso.csv",row.names = F)
+
+```
+
+```{r ohdg, echo=FALSE}
+regression_functionOHDG<-function(met, dataframe) {
+  formula    <- as.formula(paste("log(ohdg_TR)~ ", met, "+ phase + Sex + BMI_start_sds + DaysfromTreatment + log(ohdg_BL) + cr +", met,"*DaysfromTreatment + (1|Code)", sep="" ))
+  res.mixed <- lmer(formula, data = dataframe)
+}
+models_simpleOHDG<-lapply(metabs,function(x) regression_functionOHDG(x, df_log4))
+
+Upper_MetOHDG<-NA
+smod_coefOHDG<-NA
+Lower_MetOHDG<-NA
+pvaluesOHDG<-NA
+
+for (model in 1:length(models_simpleOHDG)) {
+  Upper_MetOHDG [model]<-eval(parse(text=(paste("confint(models_simpleOHDG[[", model , "]])[4,2]", sep=""))))
+  Lower_MetOHDG [model]<-eval(parse(text=(paste("confint(models_simpleOHDG[[", model , "]])[4,1]", sep=""))))
+  smod_coefOHDG [model]<-eval(parse(text=(paste("fixef(models_simpleOHDG[[", model , "]])[2]", sep=""))))
+ pvaluesOHDG[model]<-eval(parse(text=(paste("parameters::p_value(models_simpleOHDG[[", model,"]])[2,2]", sep="")))) 
+}
+
+resultsOHDG<-cbind.data.frame(metabs, smod_coefOHDG, Lower_MetOHDG, Upper_MetOHDG, pvaluesOHDG)
+
+pvalues_ohdg_phase <- NA
+smod_coef_phase_ohdg <- NA
+for (model in 1:length(models_simpleOHDG)) {
+ smod_coef_phase_ohdg [model]<-eval(parse(text=(paste("fixef(models_simpleOHDG[[", model , "]])[3]", sep=""))))
+ pvalues_ohdg_phase[model]<-eval(parse(text=(paste("parameters::p_value(models_simpleOHDG[[", model,"]])[3,2]", sep=""))))
+}
+
+smod_coef_interac_oh_IT <- NA
+pvalues_oh_interac_IT <- NA
+for (model in 1:length(models_simpleOHDG)) {
+ smod_coef_interac_oh_IT [model]<-eval(parse(text=(paste("fixef(models_simpleOHDG[[", model , "]])[9]", sep=""))))
+ pvalues_oh_interac_IT[model]<-eval(parse(text=(paste("parameters::p_value(models_simpleOHDG[[", model,"]])[9,2]", sep=""))))
+}
+
+results_oh_phase_interac <- cbind.data.frame(metabs,smod_coef_phase_ohdg,pvalues_ohdg_phase, smod_coef_interac_oh_IT,pvalues_oh_interac_IT)
+
+write.csv(results_oh_phase_interac, "phase_interaction_pvalues_oh.csv",row.names = F)
+
+
+```
+
+
+```{r fdr_cis_IT, echo=FALSE}
+results_met$type <- "met"
+results_PB$type <- "PB"
+results_ISO_IT$type <- "iso_IT"
+resultsOHDG$type <- "ohdg"
+
+names(results_PB) <- names(results_met)
+names(results_ISO_IT) <- names(results_met)
+names(resultsOHDG) <- names(results_met)
+
+total_results_IT <- rbind.data.frame(results_met,results_PB,
+                                  results_ISO_IT,resultsOHDG)
+
+total_results_IT$FDR_overall <-p.adjust(total_results_IT$pvalues,
+method = "fdr")
+
+write.csv(total_results_IT, file="FDR_adjusted_all_met_IT.csv", row.names = F)
+
+total_padj_IT <- subset(total_results_IT, FDR_overall<0.05)
+
+write.csv(total_padj_IT, file="FDR_adjusted_sig_met_IT.csv",row.names = F)
+```
