@@ -1,0 +1,443 @@
+---
+title: "Untitled"
+author: "Stavros Oikonomou"
+date: "6/11/2021"
+output: html_document
+---
+
+```{r packages, warning=F,message=F}
+rm(list = ls(all = TRUE))
+
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+# usage
+packages <- c("openxlsx","plyr","dplyr","data.table","tidyr","knitr","tibble","Hmisc",
+              "tableone","compare","stargazer","ggplot2","sjPlot","tidyverse","lubridate",
+              "eeptools", "Rcpp", "nlme", "lme4","lmerTest","texreg","reshape","scales",
+              "FSA","NADA","childsds", "sjPlot","matrixStats","ggfortify","factoextra",
+              "broomExtra")
+
+ipak(packages)
+```
+
+```{r readfiles, echo=FALSE}
+# read metadata associated with participants and samples
+odf<-read.csv("./data_files/meas_omics_f.csv", header=T, sep=",")
+
+# read metabolites dataset following pre-processing (QCs, blanks, samples) - output from SERFF platform 
+df_serrf<-read.csv("./data_files/df_serrf 270521.csv")
+
+# read files with RSD values - output from SERFF platform
+rsd <- read.csv("./data_files/RSDs 270521.csv")
+```
+
+```{r rsd_d_ratio, echo=FALSE}
+
+# check how many metabolites have RSD>0.2
+sum(rsd$SERRF>0.2)
+
+## D-ratio ##
+
+# select only metabolites in QCs
+serrf_qc <- subset(df_serrf, qc=="QC") %>% 
+  select(-c("batch", "sample_order","sample_name", "qc"))
+# select only metabolites in samples
+serrf_sample <- subset(df_serrf, qc=="Sample") %>% 
+  select(-c("batch", "sample_order", "sample_name", "qc"))
+
+# estimate SD for metabolites in QCs
+serrf_sd_qc <- sapply(serrf_qc, sd)
+# estimate SD for metabolites in samples
+serrf_sd_sample <- sapply(serrf_sample, sd)
+
+# calculate d-ratio y dividing SD of metabolites in QCs by SD of metabolites in samples
+rsd$d_ratio <- serrf_sd_qc/serrf_sd_sample
+
+# check how many metabolites have D-ratio>0.5
+sum(rsd$d_ratio>0.5)
+
+
+# include only metabolites with RSD<=20% and D-ratio<=50%
+metab <- rsd[rsd$SERRF<=0.20 & rsd$d_ratio<=0.50,"label"]
+
+```
+
+```{r PCA_qc_clustering, echo=FALSE}
+
+rm(serrf_qc, serrf_sample, serrf_sd_qc, serrf_sd_sample, rsd)
+
+## PCA ##
+goodmetabs_sub<-c("batch", "sample_order","sample_name", "qc", metab)
+
+# select metabolites only in samples and QCs
+df_log_pca <- df_serrf %>% select(all_of(goodmetabs_sub)) %>% filter(sample_name!="WBlank")
+
+# log-transform the metabolites
+df_log_pca[, metab] <- log(df_log_pca[,metab])
+
+# scale and center metabolites
+df_logpca <- prcomp(df_log_pca[, metab] , center = TRUE, scale. = TRUE)
+
+autoplot(df_logpca, data=df_log_pca, colour="qc", label=T, frame = TRUE, frame.type = 'norm')
+
+
+```
+
+```{r dataset_onlysamples_log, echo=FALSE}
+
+rm(df_logpca, df_log_pca)
+
+# include only samples
+df_serrf2 <- df_serrf %>% select(all_of(goodmetabs_sub)) %>% 
+  filter(qc=="Sample") %>%
+  # delete observations 2126-2, 2216-2 because they are double, 
+  filter(sample_name != "2126-2") %>%
+  filter(sample_name != "2216-2")
+
+# for sample_name keep only first 4 characters
+df_serrf2$sample_name = substr(df_serrf2$sample_name,  start = 1, stop = 4)
+
+df<-merge(odf, df_serrf2, by.x="sample_code", by.y="sample_name")
+
+df1 <- df
+df1[,metab] <- log(df1[,metab])
+```
+
+```{r PCA_samples, echo=FALSE}
+
+rm(df, df_serrf2, goodmetabs_sub, odf, df_serrf)
+
+dff_logpca <- prcomp(df1[,metab], center = TRUE, scale = TRUE)
+
+p1 <-fviz_pca_ind(dff_logpca,
+         col.ind = "contrib", # Color by contribution
+         gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"))
+         
+p1
+
+```
+
+```{r prepare_df_before_running models, echo=FALSE}
+
+# include only samples with contribution < 4
+p1_filter<- p1$data$contrib < 4
+table(p1_filter)
+
+df2 <- df1[p1_filter,]
+
+# create subset with participants with more than 12 days in the organic phase - original manuscript
+df_log <- df2 %>% 
+  filter(initial_anal=="Included")
+
+# scale and center metabolites
+df_log[,metab] <- scale(df_log[,metab], scale = TRUE, center = TRUE)
+
+# str(df_log)
+
+# log, scale and center 3-PBA
+df_log$pb1000_transf <- scale(log(df_log$pb1000), center=TRUE, scale=TRUE)
+# scale and center creatinine
+df_log$cr_transf <- scale(df_log$cr, center=TRUE, scale=TRUE)
+
+# convert variables into factors
+df_log[, c("Code","SCID",
+    "Group","phase",
+    "Sex", "cnlod")]<-             
+  lapply(df_log[, c("Code","SCID",
+    "Group","phase",
+    "Sex", "cnlod")], factor)
+
+rm(p1,p1_filter)
+
+```
+
+
+```{r}
+formula_met_int<-"value ~ phase + Sex + cr_transf + BMI_start_sds + DaysfromTreatment + phase*DaysfromTreatment + (1|Code)"
+
+formula_met<-"value ~ phase + Sex + cr_transf + BMI_start_sds + DaysfromTreatment + (1|Code)"
+
+results_interac_trt <- df_log %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,all_of(metab),Code,cr_transf) %>%
+  pivot_longer(cols=all_of(metab), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_met_int, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="phaseOrganic:DaysfromTreatment") %>%
+  ungroup()
+
+metabs_sig_inter_trt <- results_interac_trt %>%
+  filter(p.value<=0.05) %>% pull(variable)
+
+metabs_nonsig_inter_trt <- results_interac_trt %>%
+  filter(p.value>0.05) %>% pull(variable)
+
+
+results_met_1 <- df_log %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,
+         all_of(metabs_sig_inter_trt),Code, cr_transf) %>%
+  pivot_longer(cols=all_of(metabs_sig_inter_trt), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_met_int, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="phaseOrganic") %>%
+  mutate(type="met_int") %>%
+  ungroup()
+
+results_met_2 <- df_log %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,
+         all_of(metabs_nonsig_inter_trt),cr_transf,Code) %>%
+  pivot_longer(cols=all_of(metabs_nonsig_inter_trt), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_met, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="phaseOrganic") %>%
+  mutate(type="met") %>%
+  ungroup()
+
+rm(formula_met,formula_met_int,results_interac_trt,metabs_sig_inter_trt,metabs_nonsig_inter_trt)
+```
+
+
+```{r}
+formula_pba_int <- "value ~ pb1000_transf + phase + Sex + cr_transf + BMI_start_sds + DaysfromTreatment + pb1000_transf*DaysfromTreatment + (1|Code)"
+
+formula_pba <- "value ~ pb1000_transf + phase + Sex + cr_transf + BMI_start_sds + DaysfromTreatment + (1|Code)"
+
+results_interac_pba <- df_log %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,pb1000_transf,cr_transf,all_of(metab),Code) %>%
+  pivot_longer(cols=all_of(metab), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_pba_int, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="pb1000_transf:DaysfromTreatment") %>%
+  ungroup()
+
+metabs_sig_inter_pba <- results_interac_pba %>%
+  filter(p.value<=0.05) %>% pull(variable)
+
+metabs_nonsig_inter_pba <- results_interac_pba %>%
+  filter(p.value>0.05) %>% pull(variable)
+
+results_pba_1 <- df_log %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,pb1000_transf,
+         cr_transf,all_of(metabs_sig_inter_pba),Code) %>%
+  pivot_longer(cols=all_of(metabs_sig_inter_pba), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_pba_int, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="pb1000_transf") %>%
+  mutate(type="pba_int") %>%
+  ungroup()
+
+results_pba_2 <- df_log %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,pb1000_transf,cr_transf,
+         all_of(metabs_nonsig_inter_pba),Code) %>%
+  pivot_longer(cols=all_of(metabs_nonsig_inter_pba), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_pba, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="pb1000_transf") %>%
+  mutate(type="pba") %>%
+  ungroup()
+
+rm(formula_pba,formula_pba_int,results_interac_pba,metabs_sig_inter_pba,metabs_nonsig_inter_pba)
+```
+
+
+```{r}
+formula_cn_int <- "value ~ cnlod + phase + Sex + cr_transf + BMI_start_sds + DaysfromTreatment + cnlod*DaysfromTreatment + (1|Code)"
+
+formula_cn <- "value ~ cnlod + phase + Sex + cr_transf + BMI_start_sds + DaysfromTreatment + (1|Code)"
+
+results_interac_cn <- df_log %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,cnlod,cr_transf,all_of(metab),Code) %>%
+  pivot_longer(cols=all_of(metab), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_cn_int, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="cnlodBelow LOD:DaysfromTreatment") %>%
+  ungroup()
+
+metabs_sig_inter_cn <- results_interac_cn %>%
+  filter(p.value<=0.05) %>% pull(variable)
+
+metabs_nonsig_inter_cn <- results_interac_cn %>%
+  filter(p.value>0.05) %>% pull(variable)
+
+results_cn_1 <- df_log %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,cnlod,
+         cr_transf,all_of(metabs_sig_inter_cn),Code) %>%
+  pivot_longer(cols=all_of(metabs_sig_inter_cn), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_cn_int, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="cnlodBelow LOD") %>%
+  mutate(type="cn_int") %>%
+  ungroup()
+
+results_cn_2 <- df_log %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,cnlod,
+         cr_transf,all_of(metabs_nonsig_inter_cn),Code) %>%
+  pivot_longer(cols=all_of(metabs_nonsig_inter_cn), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_cn, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="cnlodBelow LOD") %>%
+  mutate(type="cn") %>%
+  ungroup()
+
+rm(formula_cn,formula_cn_int,results_interac_cn,metabs_sig_inter_cn,metabs_nonsig_inter_cn)
+```
+
+```{r}
+# separate baseline sample and adjust OSI models with it
+df_log$sample_no_orig <- as.numeric(df_log$sample_no_orig)
+df_log2 <- subset(df_log, sample_no_orig>=2)
+
+df_log3 <- subset(df_log, sample_no_orig<=1)
+df_log3 <- df_log3[c("Code","sample_no_orig","md1000","ohdg","isopgf2a1000")]
+
+df_log4 <- merge(df_log3, df_log2, by = "Code", all.y = TRUE, suffixes = c("_BL", "_TR"))
+
+# log, scale and center 8-iso-pgf2a, 8-OHdG
+df_log4$iso_transf_TR <- scale(log(df_log4$isopgf2a1000_TR), center=TRUE, scale=TRUE)
+df_log4$iso_transf_BL <- scale(log(df_log4$isopgf2a1000_BL), center=TRUE, scale=TRUE)
+
+df_log4$ohdg_transf_TR <- scale(log(df_log4$ohdg_TR), center=TRUE, scale=TRUE)
+df_log4$ohdg_transf_BL <- scale(log(df_log4$ohdg_BL), center=TRUE, scale=TRUE)
+
+rm(df_log, df_log2, df_log3)
+```
+
+
+```{r}
+formula_iso_int <- "iso_transf_TR ~ value + phase + Sex + cr_transf + BMI_start_sds + iso_transf_BL + DaysfromTreatment + value*DaysfromTreatment + (1|Code)"
+
+formula_iso <- "iso_transf_TR ~ value + phase + Sex + cr_transf + BMI_start_sds + DaysfromTreatment + iso_transf_BL + (1|Code)"
+
+results_interac_iso <- df_log4 %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,iso_transf_TR,
+         iso_transf_BL,cr_transf,all_of(metab),Code) %>%
+  pivot_longer(cols=all_of(metab), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_iso_int, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="value:DaysfromTreatment") %>%
+  ungroup()
+
+metabs_sig_inter_iso <- results_interac_iso %>%
+  filter(p.value<=0.05) %>% pull(variable)
+
+metabs_nonsig_inter_iso <- results_interac_iso %>%
+  filter(p.value>0.05) %>% pull(variable)
+
+results_iso_1 <- df_log4 %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,iso_transf_TR,
+         iso_transf_BL,cr_transf,all_of(metabs_sig_inter_iso),Code) %>%
+  pivot_longer(cols=all_of(metabs_sig_inter_iso), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_iso_int, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="value") %>%
+  mutate(type="iso_int") %>%
+  ungroup()
+
+results_iso_2 <- df_log4 %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,iso_transf_TR,
+         iso_transf_BL,cr_transf,all_of(metabs_nonsig_inter_iso),Code) %>%
+  pivot_longer(cols=all_of(metabs_nonsig_inter_iso), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_iso, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="value") %>%
+  mutate(type="iso") %>%
+  ungroup()
+
+rm(formula_iso,formula_iso_int,results_interac_iso,metabs_sig_inter_iso,metabs_nonsig_inter_iso)
+```
+
+```{r}
+formula_ohdg_int <- "ohdg_transf_TR ~ value + phase + Sex + cr_transf + BMI_start_sds + ohdg_transf_BL + DaysfromTreatment + value*DaysfromTreatment + (1|Code)"
+
+formula_ohdg <- "ohdg_transf_TR ~ value + phase + Sex + cr_transf + BMI_start_sds + DaysfromTreatment + ohdg_transf_BL + (1|Code)"
+
+results_interac_ohdg <- df_log4 %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,ohdg_transf_TR,
+         ohdg_transf_BL,cr_transf,all_of(metab),Code) %>%
+  pivot_longer(cols=all_of(metab), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_ohdg_int, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="value:DaysfromTreatment") %>%
+  ungroup()
+
+metabs_sig_inter_ohdg <- results_interac_ohdg %>%
+  filter(p.value<=0.05) %>% pull(variable)
+
+metabs_nonsig_inter_ohdg <- results_interac_ohdg %>%
+  filter(p.value>0.05) %>% pull(variable)
+
+results_ohdg_1 <- df_log4 %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,ohdg_transf_TR,
+         ohdg_transf_BL,cr_transf,all_of(metabs_sig_inter_ohdg),Code) %>%
+  pivot_longer(cols=all_of(metabs_sig_inter_ohdg), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_ohdg_int, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="value") %>%
+  mutate(type="ohdg_int") %>%
+  ungroup()
+
+results_ohdg_2 <- df_log4 %>%
+  select(phase,Sex,BMI_start_sds,DaysfromTreatment,ohdg_transf_TR,
+         ohdg_transf_BL,cr_transf,all_of(metabs_nonsig_inter_ohdg),Code) %>%
+  pivot_longer(cols=all_of(metabs_nonsig_inter_ohdg), names_to = "variable", values_to = "value") %>% 
+  mutate(value=as.numeric(value)) %>%
+  group_by(variable) %>%
+  do(broomExtra::tidy(x=lmer(formula=formula_ohdg, data = .),
+                      effects = "fixed", conf.int = TRUE)) %>%
+  filter(term=="value") %>%
+  mutate(type="ohdg") %>%
+  ungroup()
+
+rm(formula_ohdg,formula_ohdg_int,results_interac_ohdg,metabs_sig_inter_ohdg,metabs_nonsig_inter_ohdg)
+```
+
+```{r}
+total_results <- rbind.data.frame(results_met_1,results_met_2,
+                                  results_pba_1,results_pba_2,
+                                  results_cn_1, results_cn_2,
+                                  results_iso_1,results_iso_2,
+                                  results_ohdg_1, results_ohdg_2)
+
+total_results <- total_results %>% 
+  select(variable,estimate,std.error,statistic,p.value,conf.low,conf.high,type) %>%
+  mutate(fdr = p.adjust(p.value,method="fdr"))
+
+write.csv(total_results, file="FDR_adjusted_all_met_110621_cr.csv", row.names = F)
+
+total_padj <- subset(total_results, fdr<=0.05)
+
+write.csv(total_padj, file="FDR_adjusted_sig_met_110621_cr.csv", row.names = F)
+```
+
