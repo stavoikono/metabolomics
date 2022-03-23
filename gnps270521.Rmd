@@ -1,0 +1,189 @@
+---
+title: "DATA PREPROCESSING, FILTERING AND SERRF NORMALIZATION FOR GNPS DECONVOLUTION FROM ORGANIKO STUDY"
+author: "Stavros Oikonomou"
+date: "4/28/2021"
+output: html_document
+---
+
+```{r libraries, include=FALSE}
+rm(list = ls(all = TRUE))
+
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+# usage
+packages <- c("stringr","AMR","ggfortify","dplyr","ggplot2","rtemis","limma","readxl","xlsx")
+
+ipak(packages)
+rm(ipak,packages)
+```
+
+```{r loading the gnps outcome}
+df <- read.csv("./data_files/omics_peak_table_20210428.csv", row.names=1, header = F)
+names(df) <- paste0("V",df[1,])
+```
+
+```{r sample info creation}
+rts <- sub(".*(?:\\((.*)\\)).*|.*", "\\1",df[2,]) #keep the parenthesis content
+
+rts <- str_remove(rts,"%") #removing the %
+
+df[2,] <- as.numeric(rts)#replace the RTS
+
+filter <- as.numeric(rts) > 60 # creating a filter for compounds above 60%
+
+table(filter)
+
+df2 <- df[,filter]
+
+# split the row names to get the information for batch, sample order and sample name
+types <- str_split_fixed(row.names(df2)[5:nrow(df2)], "_",4)
+types <- as.data.frame(types) # create the type dataset
+types <- types[,-1] # removing the first column with OO
+names(types) <- c("batch","sample_order","sample_name")
+
+types[types$sample_name=="WBLANK","sample_name"] <- "WBlank"
+
+# create the type of sample
+types$qc <- ifelse(types$sample_name=="QC","QC",ifelse(types$sample_name=="WBlank","Blank","Sample"))
+```
+
+```{r}
+# keep metabolite information and change to numeric
+df_final <- df2[5:nrow(df2),] %>% mutate_if(is.character, as.numeric)
+
+# binding metabolites data with sample and batch information
+df_final <- cbind(types,df_final)
+#arrange by batch and sample order
+df_final <- df_final %>% mutate(batch=as.numeric(batch),sample_order=as.numeric(sample_order)) %>%
+  arrange(batch, sample_order)
+
+rm(types)
+```
+
+
+```{r zero percentage filtering}
+#count percentage of zeros in sample
+zero_counter <- df_final %>% filter(qc=="Sample") %>% 
+  select(-c("batch","sample_order","sample_name","qc"))
+
+#create a filter with metabolite's zero above or below 20%
+zero_counter_filter <- sapply(zero_counter, function(x) sum(x==0)/nrow(zero_counter)<0.20)
+
+table(zero_counter_filter)
+#the metabolite list with zero percentage in samples below 20%
+non_zero_met <- names(zero_counter)[zero_counter_filter]
+```
+
+### SERRF DATA PREPARATION
+
+```{r}
+df_ser <- df_final %>% 
+  filter(batch %in% 1:10) %>%
+  filter(qc!="QC") %>% select(-batch,-sample_order,-sample_name)
+
+test <- data.frame()
+metabs <- names(df_ser)[2:233]
+for(i in metabs){
+  k <- median(df_ser[df_ser$qc=="Sample",i])
+  k2 <- c(i,k)
+  test <- rbind(test,k2)
+}
+
+df_sample <- df_final %>% filter(qc=="Sample") %>% select(-batch,-sample_order,-sample_name,-qc)
+medians <- sapply(df_sample, median)
+medians5perc <- medians*0.05
+
+df_blank <- df_final %>% filter(qc=="Blank" ) %>% select(-batch,-sample_order,-sample_name,-qc)
+
+blanks <- data.frame()
+for(i in 1:length(df_blank)){
+  k <- as.vector(df_blank[,i] > medians5perc[i])
+  blanks <- rbind.data.frame(blanks,k)
+}
+
+blanks <- data.frame(t(blanks))
+names(blanks) <- names(df_blank)
+row.names(subblank) <- 1:53
+
+check <- sapply(blanks, sum)/53
+
+subblank <- blanks[,mets]
+check2 <- sapply(subblank, sum)/53
+
+check3 <- apply(subblank,1,sum)/42
+
+
+
+names(test) <- c("metab","ratio")
+
+test$crit <- ifelse(test$ratio>0.05,"Rejected","Accepted")
+prop.table(table(test$crit))
+
+asdf <- read.csv("FDR_adjusted_sig_met_110621_cr.csv")
+mets <- asdf %>% pull(variable) %>% unique()
+
+test$inmet <- ifelse(test$metab %in% mets,"In","Out")
+table(test$crit,test$inmet)
+
+test$metab[test$crit=="Rejected"& test$inmet=="In"]
+
+test2 <- subset(test, inmet=="In")
+
+
+
+
+
+
+
+df_final[df_final$qc=="Blank","qc"] <- "NA" #changing blank to sample
+
+#keep the metabolites with zero percentage in samples below 20%
+df_final2 <- df_final[c("batch","sample_order","sample_name","qc",non_zero_met)]
+```
+
+```{r serrf input creation}
+#changing the dataset in acceptable from SERRF platform format
+s0 <- c("","batch", as.character(df_final2$batch))
+s1 <- c("","sampleType", tolower(df_final2$qc))
+s2 <- c("","time",1:nrow(df_final2))
+s3 <- c("No","label",df_final2$sample_name)
+
+s4<- df_final2 %>% select(-c("batch","sample_order","sample_name","qc"))
+s4 <- data.frame(t(s4))
+s4 <- cbind(1:nrow(s4),row.names(s4),s4)
+
+ser <- rbind(s0,s1,s2,s3,s4)
+```
+
+
+```{r, eval=F}
+write.xlsx(ser, "./data_files/GNPS_SERRF_blank_zero_NA_270521.xlsx", sheetName = "Sheet1", 
+           row.names = F,col.names = F)
+
+rm(s0,s1,s2,s3,s4)
+```
+
+### loading the output from SERRF platform
+
+[SERRF platform](https://slfan.shinyapps.io/ShinySERRF/)
+
+```{r serrf output}
+df_serrf <- read.csv("./data_files/normalized by - SERRF 270521.csv")
+df_serrf <- data.frame(t(df_serrf))
+
+#using the first row for name column and removing it from our dataset.
+names(df_serrf) <- df_serrf[1,]
+df_serrf <- df_serrf[2:nrow(df_serrf),]
+
+#binding the sample information with our serrf normalized dataset.
+df_serrf <- cbind(df_final2[,1:4],df_serrf)
+```
+
+```{r, eval=F}
+write.csv(df_serrf,"./data_files/df_serrf 270521.csv",row.names = F)
+```
