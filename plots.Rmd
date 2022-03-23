@@ -1,7 +1,7 @@
 ---
-title: "RAW/LOESS/SERRF plots"
+title: "RAW/SERRF plots"
 author: "Stavros Oikonomou"
-date: "3/16/2021"
+date: "2/6/2021"
 output: html_document
 ---
 
@@ -12,118 +12,51 @@ library(readxl)
 
 
 ```{r, include=FALSE}
-df_raw <- read.csv("df_raw.csv")
-df_loess <- read.csv("df_loess.csv")
-df_SERRF <- read.csv("df_SERRF.csv")
+df_raw <- read.csv("./data_files/df_raw.csv")
+df_SERRF <- read.csv("./data_files/df_serrf 270521.csv")
 ```
 
-```{r, include=FALSE}
-df_r1 <- df_raw[,1:4]
-df_r2 <- df_raw[,5:233]
-
-df_r2 <- data.frame(sapply(df_r2, function(x) log(x+0.1)))
-
-df_r <- cbind(df_r1,df_r2)
-```
-
-
-```{r, include=FALSE}
-df_l1 <- df_loess[,1:4]
-df_l2 <- df_loess[,5:233]
-
-df_l2 <- data.frame(sapply(df_l2, function(x) log(x+0.1)))
-
-df_l <- cbind(df_l1,df_l2)
-```
 
 ```{r, include=FALSE}
 df_s1 <- df_SERRF[,1:4]
-df_s2 <- df_SERRF[,5:233]
+df_s2 <- df_SERRF[,5:169]
 
 df_s2 <- data.frame(sapply(df_s2, function(x) log(x+0.1)))
+
+metabs <- names(df_s2)
 
 df_s <- cbind(df_s1,df_s2)
 ```
 
+```{r, include=FALSE}
+df_r1 <- df_raw[,1:4]
+df_r2 <- df_raw[,5:169]
+
+df_r2 <- data.frame(sapply(df_r2, function(x) log(x+0.1)))
+df_r2 <- df_r2[metabs]
+
+df_r <- cbind(df_r1,df_r2)
+```
+
 ```{r, include=F}
 set.seed(1234)
-sample_met <- sample.int(233, size=20)
+sample_met <- sample.int(168, size=20)
 sample_met <- sample_met[sample_met>4]
 ```
 
-### RAW DATA PLOT
-```{r, eval=F}
+
+```{r, fig.width=10, fig.height=10}
 for (i in sample_met){
-  plot(df_r$order, df_r[,i], ylab="log(Peak Area)",xlab="Injection order", pch=20, col=factor(df_r$qc), main = paste("Plotting the ", names(df_r)[i], "metabolite"))
-}
-```
+  par(mfrow=c(1,2))
+  plot(1:1315, df_r[,i], ylab="log(Peak Area)",xlab="Injection order", pch=20,   col=factor(df_r$qc),
+       main = paste(names(df_r)[i], "metabolite raw")) 
+  legend("bottomleft", inset=.02, c("Sample","QC"),fill=c("red","black"),box.lty=0)
 
-
-### Loess plots
-```{r, eval=F}
-for (i in sample_met){
-  plot(df_l$order, df_l[,i], ylab="log(Peak Area)",xlab="Injection order", pch=20, col=factor(df_l$qc), main = paste("Plotting the ", names(df_l)[i], "metabolite after Loess Normalization"))
-}
-```
-
-### SERRF plot
-```{r, eval=F}
-for (i in sample_met){
-  plot(df_s$order, df_s[,i], ylab="log(Peak Area)",xlab="Injection order", pch=20, col=factor(df_s$qc), main = paste("Plotting the ", names(df_s)[i], "metabolite after SERRF Normalization"))
-}
-```
-
-```{r}
-for (i in sample_met){
-  par(mfrow=c(1,3))
-  plot(df_r$order, df_r[,i], ylab="log(Peak Area)",xlab="Injection order", pch=20,   col=factor(df_r$qc), main = paste(names(df_r)[i], "metabolite raw"))
-
-  plot(df_l$order, df_l[,i], ylab="log(Peak Area)",xlab="Injection order", pch=20, col=factor(df_l$qc), main = paste(names(df_l)[i], "metabolite LOESS"))
-
-  plot(df_s$order, df_s[,i], ylab="log(Peak Area)",xlab="Injection order", pch=20, col=factor(df_s$qc), main = paste(names(df_s)[i], "metabolite SERRF"))
+  plot(1:1315, df_s[,i], ylab="log(Peak Area)",xlab="Injection order", pch=20, col=factor(df_s$qc), 
+       main = paste(names(df_s)[i], "metabolite SERRF"))
+  legend("bottomleft", inset=.02,c("Sample","QC"),fill=c("red","black"),box.lty=0)
 }
 
 ```
 
 
-```{r}
-dat <- read.csv("normalized by - SERRF.csv")
-row.names(dat) <- dat[,1]
-dat$label <- NULL
-
-dat_mat <- matrix(dat)
-
-remove_outlier = function(v){
-    out = boxplot.stats(v)$out
-    
-    return(list(value = v[!v%in%out],index = which(v%in%out)))
-}
-
-
-RSD = function(data){
-    return(apply(data,1,function(x){
-      x = remove_outlier(x)[[1]]
-      return(sd(x,na.rm=T)/mean(x,na.rm=T))
-    }))
-}
-
-rsd <- RSD(dat)
-rsd2 <- RSD(dat_mat)
-
-```
-
-```{r}
-remove_outlier_2 = function(v){
-    out = boxplot.stats(v)$out
-    return(value = v%in%out)
-}
-
-ela <- remove_outlier(dat[,2])[[1]]
-
-
-rrs <- RSD(dat_mat)
-
-t1 <- sapply(dat, remove_outlier_2)
-
-boxplot.stats(dat$)$out
-```
